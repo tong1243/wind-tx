@@ -8,17 +8,18 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import jakarta.annotation.PreDestroy;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.event.ApplicationStartedEvent;
 import org.springframework.context.ApplicationListener;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-@Slf4j
 @Component
 @ConditionalOnProperty(prefix = "msg.udp", name = "enabled", havingValue = "true")
 public class UdpRealtimeServer implements ApplicationListener<ApplicationStartedEvent> {
+    private static final Logger log = LoggerFactory.getLogger(UdpRealtimeServer.class);
     private final UdpRealtimeHandler udpRealtimeHandler;
     private final EventLoopGroup eventLoopGroup = new NioEventLoopGroup();
 

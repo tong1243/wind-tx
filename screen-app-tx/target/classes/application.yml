@@ -44,3 +44,13 @@ logging:
 
 mybatis-plus:
   mapperLocations: ["classpath*:/Mapper/*.xml"]
+
+msg:
+  udp:
+    enabled: true
+    host: 0.0.0.0
+    port: 7777
+    ack-enabled: false
+    ack-message: "ACK"
+    timestamp-on-change: true
+    timestamp-debounce-ms: 150

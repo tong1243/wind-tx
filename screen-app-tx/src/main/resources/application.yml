@@ -53,3 +53,4 @@ msg:
     ack-enabled: false
     ack-message: "ACK"
     timestamp-on-change: true
+    timestamp-debounce-ms: 150

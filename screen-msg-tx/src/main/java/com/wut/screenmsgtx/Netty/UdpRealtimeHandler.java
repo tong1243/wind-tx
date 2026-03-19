@@ -7,21 +7,22 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.socket.DatagramPacket;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
-@Slf4j
 @Component
 @ChannelHandler.Sharable
 @ConditionalOnProperty(prefix = "msg.udp", name = "enabled", havingValue = "true")
 public class UdpRealtimeHandler extends SimpleChannelInboundHandler<DatagramPacket> {
+    private static final Logger log = LoggerFactory.getLogger(UdpRealtimeHandler.class);
     private final UdpRealtimeDataService udpRealtimeDataService;
     private final Executor msgTransmitTaskAsyncPool;
 
