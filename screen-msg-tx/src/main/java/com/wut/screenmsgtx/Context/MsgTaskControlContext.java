@@ -7,10 +7,14 @@ import com.wut.screenmsgtx.Service.TransmitDataService;
 import com.wut.screenmsgtx.Task.CollectDataTask;
 import com.wut.screenmsgtx.Task.TransmitDataTask;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 @Component
 public class MsgTaskControlContext {
+    @Value("${msg.udp.enabled:false}")
+    private boolean udpRealtimeEnabled;
+
     private final MsgTaskParamContext msgTaskParamContext;
     private final MsgRedisDataContext msgRedisDataContext;
     private final CollectDataTask collectDataTask;
@@ -29,6 +33,11 @@ public class MsgTaskControlContext {
     }
 
     public void controlStartMsgTask(DateTimeOrderReq req) {
+        if (udpRealtimeEnabled) {
+            controlEndMsgTask();
+            msgRedisDataContext.resetDataContext();
+            return;
+        }
         if (!DateParamParseUtil.isDateTimeOrderValid(req)) { return; }
         controlEndMsgTask();
         setInitParams(req);
