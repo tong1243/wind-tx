@@ -12,6 +12,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -116,6 +117,13 @@ public class UdpRealtimeDataService {
             if (line.endsWith(";")) {
                 line = line.substring(0, line.length() - 1);
             }
+
+            if (line.indexOf('=') >= 0) {
+                if (parseAndSendKeyValueCsv(line)) {
+                    continue;
+                }
+            }
+
             String[] cols = line.split(";");
             if (cols.length < 14) {
                 log.warn("CSV field count invalid, need>=14, actual={}, line={}", cols.length, rawLine);
@@ -138,6 +146,87 @@ public class UdpRealtimeDataService {
             data.put("distanceAlongRoad", parseDouble(cols[13], 0.0));
             sendRealtimeData(data, timestamp);
         }
+    }
+
+    private boolean parseAndSendKeyValueCsv(String line) {
+        Map<String, String> kv = parseKeyValuePairs(line);
+        if (kv.isEmpty()) {
+            return false;
+        }
+
+        // UC 分包控制行：FRAME_ID/PACKET_INDEX/PACKET_TOTAL/FRAME_END...
+        if (isControlKvLine(kv)) {
+            return true;
+        }
+
+        // 车辆数据键值对行（兼容大小写/下划线写法）
+        if (!looksLikeVehicleKvLine(kv)) {
+            return false;
+        }
+
+        long timestamp = parseLong(firstValue(kv, "TIMESTAMP", "TIME", "TS"), System.currentTimeMillis());
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("id", parseInt(firstValue(kv, "ID", "VEHICLE_ID", "CAR_ID"), 0));
+        data.put("type", parseInt(firstValue(kv, "TYPE", "VEHICLE_TYPE"), 0));
+        data.put("model", parseInt(firstValue(kv, "MODEL", "CAR_MODEL"), 1));
+        data.put("direction", parseInt(firstValue(kv, "DIRECTION", "ROAD_DIRECT"), 1));
+        data.put("longitude", parseDouble(firstValue(kv, "LONGITUDE", "LON"), 0.0));
+        data.put("latitude", parseDouble(firstValue(kv, "LATITUDE", "LAT"), 0.0));
+        data.put("height", parseDouble(firstValue(kv, "HEIGHT", "ALT"), 0.0));
+        data.put("speed", parseDouble(firstValue(kv, "SPEED", "SPEED_KMH"), 0.0));
+        data.put("acc", parseDouble(firstValue(kv, "ACC", "ACCELERATION"), 0.0));
+        data.put("yaw", parseDouble(firstValue(kv, "YAW", "HEADING_ANGLE"), 0.0));
+        data.put("road", parseInt(firstValue(kv, "ROAD"), 0));
+        data.put("Lane_ID", parseInt(firstValue(kv, "LANE_ID", "LANE", "LANEID"), 1));
+        data.put("distanceAlongRoad", parseDouble(firstValue(kv, "DISTANCE_ALONG_ROAD", "DISTANCEALONGROAD", "FRENET_X", "FIBER_X"), 0.0));
+        sendRealtimeData(data, timestamp);
+        return true;
+    }
+
+    private Map<String, String> parseKeyValuePairs(String line) {
+        Map<String, String> kv = new HashMap<>();
+        String[] cols = line.split(";");
+        for (String col : cols) {
+            String token = col.trim();
+            if (token.isEmpty()) {
+                continue;
+            }
+            int idx = token.indexOf('=');
+            if (idx <= 0 || idx >= token.length() - 1) {
+                continue;
+            }
+            String key = token.substring(0, idx).trim().toUpperCase();
+            String value = token.substring(idx + 1).trim();
+            kv.put(key, value);
+        }
+        return kv;
+    }
+
+    private boolean isControlKvLine(Map<String, String> kv) {
+        return kv.containsKey("FRAME_ID")
+                || kv.containsKey("FRAME_END")
+                || kv.containsKey("PACKET_INDEX")
+                || kv.containsKey("PACKET_TOTAL");
+    }
+
+    private boolean looksLikeVehicleKvLine(Map<String, String> kv) {
+        return kv.containsKey("ID")
+                || kv.containsKey("VEHICLE_ID")
+                || kv.containsKey("LONGITUDE")
+                || kv.containsKey("LATITUDE")
+                || kv.containsKey("DISTANCE_ALONG_ROAD")
+                || kv.containsKey("FRENET_X")
+                || kv.containsKey("FIBER_X");
+    }
+
+    private String firstValue(Map<String, String> kv, String... keys) {
+        for (String key : keys) {
+            String value = kv.get(key);
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private void sendRealtimeData(Map<String, Object> data, long timestamp) {
