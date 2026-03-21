@@ -52,5 +52,7 @@ msg:
     port: 7777
     ack-enabled: false
     ack-message: "ACK"
+    send-by-second-enabled: true
+    send-interval-sec: 1
     timestamp-on-change: true
     timestamp-debounce-ms: 150

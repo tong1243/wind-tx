@@ -16,7 +16,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -36,7 +38,10 @@ public class UdpRealtimeDataService {
     private final AtomicLong lastTimestamp = new AtomicLong(Long.MIN_VALUE);
     private final ScheduledExecutorService timestampScheduler = Executors.newSingleThreadScheduledExecutor();
     private final Map<Long, ScheduledFuture<?>> timestampTaskMap = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService secondBucketScheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ConcurrentSkipListMap<Long, ConcurrentLinkedQueue<String>> secondBucketMap = new ConcurrentSkipListMap<>();
     private final ScheduledExecutorService summaryScheduler = Executors.newSingleThreadScheduledExecutor();
+    private ScheduledFuture<?> secondBucketTaskFuture;
     private ScheduledFuture<?> summaryTaskFuture;
 
     private final LongAdder udpPayloadCount = new LongAdder();
@@ -53,6 +58,12 @@ public class UdpRealtimeDataService {
     @Value("${msg.udp.timestamp-debounce-ms:150}")
     private long timestampDebounceMs;
 
+    @Value("${msg.udp.send-by-second-enabled:true}")
+    private boolean sendBySecondEnabled;
+
+    @Value("${msg.udp.send-interval-sec:1}")
+    private long sendIntervalSec;
+
     @Value("${msg.udp.summary-log-enabled:true}")
     private boolean summaryLogEnabled;
 
@@ -66,6 +77,12 @@ public class UdpRealtimeDataService {
 
     @PostConstruct
     public void initSummaryLogger() {
+        if (sendBySecondEnabled) {
+            long intervalSec = Math.max(sendIntervalSec, 1L);
+            secondBucketTaskFuture = secondBucketScheduler.scheduleAtFixedRate(
+                    this::flushOneSecondBucket, intervalSec, intervalSec, TimeUnit.SECONDS
+            );
+        }
         if (!summaryLogEnabled) {
             return;
         }
@@ -264,6 +281,11 @@ public class UdpRealtimeDataService {
     private void sendRealtimeData(Map<String, Object> data, long timestamp) {
         try {
             String message = objectMapper.writeValueAsString(new TransmitDataModel(timestamp, data));
+            if (sendBySecondEnabled) {
+                long bucketTimestamp = normalizeSecondTimestamp(timestamp);
+                secondBucketMap.computeIfAbsent(bucketTimestamp, key -> new ConcurrentLinkedQueue<>()).add(message);
+                return;
+            }
             kafkaTemplate.send(TOPIC_NAME_FIBER, message);
             fiberSendCount.increment();
             scheduleTimestampSend(timestamp);
@@ -271,6 +293,11 @@ public class UdpRealtimeDataService {
             sendFailCount.increment();
             log.error("Send realtime data failed", e);
         }
+    }
+
+    private long normalizeSecondTimestamp(long timestamp) {
+        long safeTimestamp = timestamp > 0 ? timestamp : System.currentTimeMillis();
+        return safeTimestamp / 1000L * 1000L;
     }
 
     private JsonNode firstNonNull(JsonNode... nodes) {
@@ -360,6 +387,40 @@ public class UdpRealtimeDataService {
         }
     }
 
+    private void flushOneSecondBucket() {
+        Map.Entry<Long, ConcurrentLinkedQueue<String>> entry = secondBucketMap.pollFirstEntry();
+        if (entry == null) {
+            return;
+        }
+        long timestamp = entry.getKey();
+        ConcurrentLinkedQueue<String> queue = entry.getValue();
+        String message;
+        while ((message = queue.poll()) != null) {
+            try {
+                kafkaTemplate.send(TOPIC_NAME_FIBER, message);
+                fiberSendCount.increment();
+            } catch (Exception e) {
+                sendFailCount.increment();
+                log.error("Send realtime data failed in second-bucket mode, timestamp={}", timestamp, e);
+            }
+        }
+        trySendTimestamp(timestamp);
+    }
+
+    private void trySendTimestamp(long timestamp) {
+        if (timestamp <= 0L) {
+            return;
+        }
+        if (timestampOnChange) {
+            long last = lastTimestamp.getAndSet(timestamp);
+            if (last == timestamp) {
+                return;
+            }
+        }
+        kafkaTemplate.send(TOPIC_NAME_TIMESTAMP, Long.toString(timestamp));
+        timestampSendCount.increment();
+    }
+
     private void printAndResetSummary() {
         long payload = udpPayloadCount.sumThenReset();
         long control = csvControlLineCount.sumThenReset();
@@ -385,6 +446,13 @@ public class UdpRealtimeDataService {
         timestampTaskMap.values().forEach(task -> task.cancel(false));
         timestampTaskMap.clear();
         timestampScheduler.shutdownNow();
+        if (secondBucketTaskFuture != null) {
+            secondBucketTaskFuture.cancel(false);
+        }
+        while (!secondBucketMap.isEmpty()) {
+            flushOneSecondBucket();
+        }
+        secondBucketScheduler.shutdownNow();
         if (summaryTaskFuture != null) {
             summaryTaskFuture.cancel(false);
         }
