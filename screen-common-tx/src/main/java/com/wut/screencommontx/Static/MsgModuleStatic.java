@@ -18,7 +18,7 @@ public class MsgModuleStatic {
     public static final String DEFAULT_DATE_PATTERN = "yyyyMMdd";
     public static final long COLLECT_COND_INTERVAL = 5000;
     public static final int TRANSMIT_TASK_TIME_RATE = 200;
-    public static final long TRANSMIT_COND_INTERVAL = 200;
+    public static final long TRANSMIT_COND_INTERVAL = 1000;
     public static final int ASYNC_SERVICE_TIMEOUT = 30000;
     public static final long TRANSMIT_START_TIMEOUT = 5000;
     public static final String CORS_MAPPING = "/**";
