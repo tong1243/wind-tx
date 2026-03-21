@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wut.screencommontx.Model.TransmitDataModel;
 import com.wut.screenmsgtx.Context.MsgTaskControlContext;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +22,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
 import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_FIBER;
 import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_TIMESTAMP;
@@ -34,6 +36,16 @@ public class UdpRealtimeDataService {
     private final AtomicLong lastTimestamp = new AtomicLong(Long.MIN_VALUE);
     private final ScheduledExecutorService timestampScheduler = Executors.newSingleThreadScheduledExecutor();
     private final Map<Long, ScheduledFuture<?>> timestampTaskMap = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService summaryScheduler = Executors.newSingleThreadScheduledExecutor();
+    private ScheduledFuture<?> summaryTaskFuture;
+
+    private final LongAdder udpPayloadCount = new LongAdder();
+    private final LongAdder csvControlLineCount = new LongAdder();
+    private final LongAdder csvVehicleLineCount = new LongAdder();
+    private final LongAdder csvInvalidLineCount = new LongAdder();
+    private final LongAdder fiberSendCount = new LongAdder();
+    private final LongAdder timestampSendCount = new LongAdder();
+    private final LongAdder sendFailCount = new LongAdder();
 
     @Value("${msg.udp.timestamp-on-change:true}")
     private boolean timestampOnChange;
@@ -41,12 +53,28 @@ public class UdpRealtimeDataService {
     @Value("${msg.udp.timestamp-debounce-ms:150}")
     private long timestampDebounceMs;
 
+    @Value("${msg.udp.summary-log-enabled:true}")
+    private boolean summaryLogEnabled;
+
+    @Value("${msg.udp.summary-log-interval-sec:1}")
+    private long summaryLogIntervalSec;
+
     public UdpRealtimeDataService(KafkaTemplate<String, String> kafkaTemplate, MsgTaskControlContext msgTaskControlContext) {
         this.kafkaTemplate = kafkaTemplate;
         this.msgTaskControlContext = msgTaskControlContext;
     }
 
+    @PostConstruct
+    public void initSummaryLogger() {
+        if (!summaryLogEnabled) {
+            return;
+        }
+        long intervalSec = Math.max(summaryLogIntervalSec, 1L);
+        summaryTaskFuture = summaryScheduler.scheduleAtFixedRate(this::printAndResetSummary, intervalSec, intervalSec, TimeUnit.SECONDS);
+    }
+
     public void handleUdpPayload(byte[] payload) {
+        udpPayloadCount.increment();
         if (!msgTaskControlContext.isActive()) {
             return;
         }
@@ -126,6 +154,7 @@ public class UdpRealtimeDataService {
 
             String[] cols = line.split(";");
             if (cols.length < 14) {
+                csvInvalidLineCount.increment();
                 log.warn("CSV field count invalid, need>=14, actual={}, line={}", cols.length, rawLine);
                 continue;
             }
@@ -144,6 +173,7 @@ public class UdpRealtimeDataService {
             data.put("road", parseInt(cols[11], 0));
             data.put("Lane_ID", parseInt(cols[12], 1));
             data.put("distanceAlongRoad", parseDouble(cols[13], 0.0));
+            csvVehicleLineCount.increment();
             sendRealtimeData(data, timestamp);
         }
     }
@@ -156,6 +186,7 @@ public class UdpRealtimeDataService {
 
         // UC 分包控制行：FRAME_ID/PACKET_INDEX/PACKET_TOTAL/FRAME_END...
         if (isControlKvLine(kv)) {
+            csvControlLineCount.increment();
             return true;
         }
 
@@ -179,6 +210,7 @@ public class UdpRealtimeDataService {
         data.put("road", parseInt(firstValue(kv, "ROAD"), 0));
         data.put("Lane_ID", parseInt(firstValue(kv, "LANE_ID", "LANE", "LANEID"), 1));
         data.put("distanceAlongRoad", parseDouble(firstValue(kv, "DISTANCE_ALONG_ROAD", "DISTANCEALONGROAD", "FRENET_X", "FIBER_X"), 0.0));
+        csvVehicleLineCount.increment();
         sendRealtimeData(data, timestamp);
         return true;
     }
@@ -233,8 +265,10 @@ public class UdpRealtimeDataService {
         try {
             String message = objectMapper.writeValueAsString(new TransmitDataModel(timestamp, data));
             kafkaTemplate.send(TOPIC_NAME_FIBER, message);
+            fiberSendCount.increment();
             scheduleTimestampSend(timestamp);
         } catch (Exception e) {
+            sendFailCount.increment();
             log.error("Send realtime data failed", e);
         }
     }
@@ -311,7 +345,9 @@ public class UdpRealtimeDataService {
                     }
                 }
                 kafkaTemplate.send(TOPIC_NAME_TIMESTAMP, Long.toString(timestamp));
+                timestampSendCount.increment();
             } catch (Exception e) {
+                sendFailCount.increment();
                 log.error("Send timestamp failed, timestamp={}", timestamp, e);
             } finally {
                 timestampTaskMap.remove(timestamp);
@@ -324,10 +360,34 @@ public class UdpRealtimeDataService {
         }
     }
 
+    private void printAndResetSummary() {
+        long payload = udpPayloadCount.sumThenReset();
+        long control = csvControlLineCount.sumThenReset();
+        long vehicle = csvVehicleLineCount.sumThenReset();
+        long invalid = csvInvalidLineCount.sumThenReset();
+        long fiberSent = fiberSendCount.sumThenReset();
+        long timestampSent = timestampSendCount.sumThenReset();
+        long failed = sendFailCount.sumThenReset();
+
+        long total = payload + control + vehicle + invalid + fiberSent + timestampSent + failed;
+        if (total == 0L) {
+            return;
+        }
+
+        log.info(
+                "UDP summary: payload={}, controlLine={}, vehicleLine={}, invalidLine={}, fiberSent={}, timestampSent={}, failed={}",
+                payload, control, vehicle, invalid, fiberSent, timestampSent, failed
+        );
+    }
+
     @PreDestroy
     public void destroy() {
         timestampTaskMap.values().forEach(task -> task.cancel(false));
         timestampTaskMap.clear();
         timestampScheduler.shutdownNow();
+        if (summaryTaskFuture != null) {
+            summaryTaskFuture.cancel(false);
+        }
+        summaryScheduler.shutdownNow();
     }
 }
