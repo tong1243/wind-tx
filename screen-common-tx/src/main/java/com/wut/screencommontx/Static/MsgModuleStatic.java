@@ -7,6 +7,7 @@ public class MsgModuleStatic {
     public static final String TOPIC_NAME_WAVE = "wave";
     public static final String TOPIC_NAME_TIMESTAMP = "timestamp";
     public static final String TOPIC_NAME_DIRECT = "direct";
+    public static final String TOPIC_NAME_WIND = "wind-realtime";
     public static final int TOPIC_PARTITION = 10;
     public static final int TOPIC_REPLICA = 1;
     public static final int TASK_POOL_SIZE = 1;

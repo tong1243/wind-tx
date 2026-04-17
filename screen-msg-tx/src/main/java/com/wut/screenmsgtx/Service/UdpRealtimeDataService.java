@@ -16,8 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -25,13 +25,19 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_FIBER;
 import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_TIMESTAMP;
+import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_WIND;
 
 @Component
 public class UdpRealtimeDataService {
     private static final Logger log = LoggerFactory.getLogger(UdpRealtimeDataService.class);
+    private static final Pattern WIND_HYPHEN_RECORD_PATTERN = Pattern.compile(
+            "^([0-9]{10,13})-([kK][0-9]+(?:\\+[0-9]+)?)-([kK][0-9]+(?:\\+[0-9]+)?)-([+-]?[0-9]+(?:\\.[0-9]+)?)$"
+    );
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final MsgTaskControlContext msgTaskControlContext;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -47,8 +53,10 @@ public class UdpRealtimeDataService {
     private final LongAdder udpPayloadCount = new LongAdder();
     private final LongAdder csvControlLineCount = new LongAdder();
     private final LongAdder csvVehicleLineCount = new LongAdder();
+    private final LongAdder csvWindLineCount = new LongAdder();
     private final LongAdder csvInvalidLineCount = new LongAdder();
     private final LongAdder fiberSendCount = new LongAdder();
+    private final LongAdder windSendCount = new LongAdder();
     private final LongAdder timestampSendCount = new LongAdder();
     private final LongAdder sendFailCount = new LongAdder();
 
@@ -108,7 +116,10 @@ public class UdpRealtimeDataService {
     }
 
     private boolean maybeCsv(String text) {
-        return text.indexOf(';') >= 0 && !(text.startsWith("{") || text.startsWith("["));
+        if (text.startsWith("{") || text.startsWith("[")) {
+            return false;
+        }
+        return text.indexOf(';') >= 0 || text.indexOf('；') >= 0 || looksLikeWindHyphenRecord(text);
     }
 
     private void parseAndSendJson(String text) {
@@ -116,25 +127,50 @@ public class UdpRealtimeDataService {
             JsonNode root = objectMapper.readTree(text);
             if (root.isArray()) {
                 for (JsonNode node : root) {
-                    normalizeJsonAndSend(node);
+                    normalizeJsonAndSend(node, System.currentTimeMillis());
                 }
                 return;
             }
-            normalizeJsonAndSend(root);
+            normalizeJsonAndSend(root, System.currentTimeMillis());
         } catch (Exception e) {
             log.warn("Ignore unsupported UDP payload, raw={}", text, e);
         }
     }
 
-    private void normalizeJsonAndSend(JsonNode rootNode) {
+    private void normalizeJsonAndSend(JsonNode rootNode, long inheritedTimestamp) {
         if (rootNode == null || rootNode.isNull() || rootNode.isMissingNode()) {
             return;
         }
+
         JsonNode dataNode = rootNode.has("data") ? rootNode.path("data") : rootNode;
         long timestamp = parseTimestamp(
-                rootNode.path("timestamp"),
-                parseTimestamp(dataNode.path("timestamp"), System.currentTimeMillis())
+                firstNonNull(rootNode.path("timestamp"), rootNode.path("timeStamp"), rootNode.path("time"), rootNode.path("ts")),
+                parseTimestamp(firstNonNull(dataNode.path("timestamp"), dataNode.path("timeStamp"), dataNode.path("time"), dataNode.path("ts")), inheritedTimestamp)
         );
+
+        if (dataNode.isArray()) {
+            for (JsonNode item : dataNode) {
+                normalizeJsonAndSend(item, timestamp);
+            }
+            return;
+        }
+
+        if (looksLikeWindJson(rootNode, dataNode)) {
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("direction", parseIntegerOrNull(firstNonNull(dataNode.path("direction"), dataNode.path("roadDirect"), dataNode.path("road_direction"), rootNode.path("direction"), rootNode.path("roadDirect"), rootNode.path("road_direction"))));
+            data.put("startStake", parseText(firstNonNull(dataNode.path("startStake"), dataNode.path("start_stake"), dataNode.path("startKm"), dataNode.path("start_km"), rootNode.path("startStake"), rootNode.path("start_stake"))));
+            data.put("endStake", parseText(firstNonNull(dataNode.path("endStake"), dataNode.path("end_stake"), dataNode.path("endKm"), dataNode.path("end_km"), rootNode.path("endStake"), rootNode.path("end_stake"))));
+            data.put("sectionName", parseText(firstNonNull(dataNode.path("sectionName"), dataNode.path("section_name"), rootNode.path("sectionName"), rootNode.path("section_name"))));
+            data.put("windSpeed", parseDouble(firstNonNull(dataNode.path("windSpeed"), dataNode.path("wind_speed"), dataNode.path("wind"), rootNode.path("windSpeed"), rootNode.path("wind_speed"), rootNode.path("wind")), 0.0));
+            data.put("windDirection", parseText(firstNonNull(dataNode.path("windDirection"), dataNode.path("wind_direction"), dataNode.path("windDir"), dataNode.path("wind_dir"), rootNode.path("windDirection"), rootNode.path("wind_direction"))));
+            data.put("heavyVehicleSpeedLimit", parseIntegerOrNull(firstNonNull(dataNode.path("heavyVehicleSpeedLimit"), dataNode.path("heavy_vehicle_speed_limit"), rootNode.path("heavyVehicleSpeedLimit"), rootNode.path("heavy_vehicle_speed_limit"))));
+            data.put("lightVehicleSpeedLimit", parseIntegerOrNull(firstNonNull(dataNode.path("lightVehicleSpeedLimit"), dataNode.path("light_vehicle_speed_limit"), rootNode.path("lightVehicleSpeedLimit"), rootNode.path("light_vehicle_speed_limit"))));
+            data.put("controlLevel", parseIntegerOrNull(firstNonNull(dataNode.path("controlLevel"), dataNode.path("control_level"), rootNode.path("controlLevel"), rootNode.path("control_level"))));
+            data.put("dataSource", parseText(firstNonNull(dataNode.path("dataSource"), dataNode.path("data_source"), dataNode.path("source"), rootNode.path("dataSource"), rootNode.path("data_source"), rootNode.path("source"))));
+            sendWindData(data, timestamp);
+            return;
+        }
+
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("id", parseInt(firstNonNull(dataNode.path("id"), dataNode.path("vehicleId")), 0));
         data.put("type", parseInt(firstNonNull(dataNode.path("type"), dataNode.path("vehicleType")), 0));
@@ -163,6 +199,10 @@ public class UdpRealtimeDataService {
                 line = line.substring(0, line.length() - 1);
             }
 
+            if (parseAndSendWindHyphenRecords(line)) {
+                continue;
+            }
+
             if (line.indexOf('=') >= 0) {
                 if (parseAndSendKeyValueCsv(line)) {
                     continue;
@@ -170,6 +210,33 @@ public class UdpRealtimeDataService {
             }
 
             String[] cols = line.split(";");
+            if (looksLikeWindPlainCsv(cols)) {
+                long timestamp = parseLong(cols[0], System.currentTimeMillis());
+                Map<String, Object> data = new LinkedHashMap<>();
+                boolean noDirectionLayout = looksLikeWindPlainCsvWithoutDirection(cols);
+                int startStakeIndex = noDirectionLayout ? 1 : 2;
+                int endStakeIndex = noDirectionLayout ? 2 : 3;
+                int windSpeedIndex = noDirectionLayout ? 3 : 4;
+                int windDirectionIndex = noDirectionLayout ? 4 : 5;
+                int dataSourceIndex = noDirectionLayout ? 5 : 6;
+                int lightLimitIndex = noDirectionLayout ? 6 : 7;
+                int heavyLimitIndex = noDirectionLayout ? 7 : 8;
+                int controlLevelIndex = noDirectionLayout ? 8 : 9;
+
+                data.put("direction", noDirectionLayout ? null : parseIntegerOrNull(cols.length > 1 ? cols[1] : ""));
+                data.put("startStake", cols.length > startStakeIndex ? cols[startStakeIndex].trim() : "");
+                data.put("endStake", cols.length > endStakeIndex ? cols[endStakeIndex].trim() : "");
+                data.put("windSpeed", parseDouble(cols.length > windSpeedIndex ? cols[windSpeedIndex] : "", 0.0));
+                data.put("windDirection", cols.length > windDirectionIndex ? cols[windDirectionIndex].trim() : "");
+                data.put("dataSource", cols.length > dataSourceIndex ? cols[dataSourceIndex].trim() : "");
+                data.put("lightVehicleSpeedLimit", parseIntegerOrNull(cols.length > lightLimitIndex ? cols[lightLimitIndex] : ""));
+                data.put("heavyVehicleSpeedLimit", parseIntegerOrNull(cols.length > heavyLimitIndex ? cols[heavyLimitIndex] : ""));
+                data.put("controlLevel", parseIntegerOrNull(cols.length > controlLevelIndex ? cols[controlLevelIndex] : ""));
+                csvWindLineCount.increment();
+                sendWindData(data, timestamp);
+                continue;
+            }
+
             if (cols.length < 14) {
                 csvInvalidLineCount.increment();
                 log.warn("CSV field count invalid, need>=14, actual={}, line={}", cols.length, rawLine);
@@ -201,13 +268,29 @@ public class UdpRealtimeDataService {
             return false;
         }
 
-        // UC 分包控制行：FRAME_ID/PACKET_INDEX/PACKET_TOTAL/FRAME_END...
         if (isControlKvLine(kv)) {
             csvControlLineCount.increment();
             return true;
         }
 
-        // 车辆数据键值对行（兼容大小写/下划线写法）
+        if (looksLikeWindKvLine(kv)) {
+            long timestamp = parseLong(firstValue(kv, "TIMESTAMP", "TIME", "TS"), System.currentTimeMillis());
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("direction", parseIntegerOrNull(firstValue(kv, "DIRECTION", "ROAD_DIRECT", "ROAD_DIRECTION")));
+            data.put("startStake", firstValue(kv, "START_STAKE", "STARTSTAKE", "START_KM", "STARTKM"));
+            data.put("endStake", firstValue(kv, "END_STAKE", "ENDSTAKE", "END_KM", "ENDKM"));
+            data.put("sectionName", firstValue(kv, "SECTION_NAME", "SECTION"));
+            data.put("windSpeed", parseDouble(firstValue(kv, "WIND_SPEED", "WINDSPEED", "WIND", "SPEED"), 0.0));
+            data.put("windDirection", firstValue(kv, "WIND_DIRECTION", "WINDDIRECTION", "WIND_DIR", "WINDDIR"));
+            data.put("heavyVehicleSpeedLimit", parseIntegerOrNull(firstValue(kv, "HEAVY_VEHICLE_SPEED_LIMIT", "HEAVY_SPEED_LIMIT", "TRUCK_SPEED_LIMIT")));
+            data.put("lightVehicleSpeedLimit", parseIntegerOrNull(firstValue(kv, "LIGHT_VEHICLE_SPEED_LIMIT", "LIGHT_SPEED_LIMIT", "CAR_SPEED_LIMIT")));
+            data.put("controlLevel", parseIntegerOrNull(firstValue(kv, "CONTROL_LEVEL", "LEVEL")));
+            data.put("dataSource", firstValue(kv, "DATA_SOURCE", "SOURCE"));
+            csvWindLineCount.increment();
+            sendWindData(data, timestamp);
+            return true;
+        }
+
         if (!looksLikeVehicleKvLine(kv)) {
             return false;
         }
@@ -268,6 +351,114 @@ public class UdpRealtimeDataService {
                 || kv.containsKey("FIBER_X");
     }
 
+    private boolean looksLikeWindKvLine(Map<String, String> kv) {
+        String msgType = firstValue(kv, "MSG_TYPE", "TYPE", "BIZ_TYPE");
+        boolean explicitWindType = "WIND".equalsIgnoreCase(msgType);
+        boolean hasStake = hasText(firstValue(kv, "START_STAKE", "STARTSTAKE", "START_KM", "STARTKM"))
+                || hasText(firstValue(kv, "END_STAKE", "ENDSTAKE", "END_KM", "ENDKM"));
+        boolean hasWindField = hasText(firstValue(kv, "WIND_SPEED", "WINDSPEED", "WIND", "WIND_DIRECTION", "WINDDIRECTION"));
+        return explicitWindType || (hasStake && hasWindField);
+    }
+
+    private boolean looksLikeWindPlainCsv(String[] cols) {
+        return looksLikeWindPlainCsvWithoutDirection(cols) || looksLikeWindPlainCsvWithDirection(cols);
+    }
+
+    private boolean looksLikeWindPlainCsvWithoutDirection(String[] cols) {
+        if (cols == null || cols.length < 4) {
+            return false;
+        }
+        if (!isNumeric(cols[0])) {
+            return false;
+        }
+        String startStake = cols[1] == null ? "" : cols[1].trim();
+        String endStake = cols[2] == null ? "" : cols[2].trim();
+        boolean hasStake = looksLikeStake(startStake) && looksLikeStake(endStake);
+        if (!hasStake) {
+            return false;
+        }
+        return isNumeric(cols[3]);
+    }
+
+    private boolean looksLikeWindPlainCsvWithDirection(String[] cols) {
+        if (cols == null || cols.length < 5) {
+            return false;
+        }
+        if (!isNumeric(cols[0])) {
+            return false;
+        }
+        String startStake = cols[2] == null ? "" : cols[2].trim();
+        String endStake = cols[3] == null ? "" : cols[3].trim();
+        boolean hasStake = looksLikeStake(startStake) && looksLikeStake(endStake);
+        if (!hasStake) {
+            return false;
+        }
+        return isNumeric(cols[4]);
+    }
+
+    private boolean parseAndSendWindHyphenRecords(String line) {
+        if (!hasText(line)) {
+            return false;
+        }
+        String[] records = line.split("[;；]");
+        int parsedCount = 0;
+        for (String raw : records) {
+            String token = raw == null ? "" : raw.trim();
+            if (token.isEmpty()) {
+                continue;
+            }
+            Matcher matcher = WIND_HYPHEN_RECORD_PATTERN.matcher(token);
+            if (!matcher.matches()) {
+                return false;
+            }
+            long timestamp = parseLong(matcher.group(1), System.currentTimeMillis());
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("direction", null);
+            data.put("startStake", matcher.group(2));
+            data.put("endStake", matcher.group(3));
+            data.put("windSpeed", parseDouble(matcher.group(4), 0.0));
+            data.put("windDirection", "");
+            data.put("dataSource", "");
+            data.put("lightVehicleSpeedLimit", null);
+            data.put("heavyVehicleSpeedLimit", null);
+            data.put("controlLevel", null);
+            csvWindLineCount.increment();
+            sendWindData(data, timestamp);
+            parsedCount++;
+        }
+        return parsedCount > 0;
+    }
+
+    private boolean looksLikeWindHyphenRecord(String text) {
+        if (!hasText(text)) {
+            return false;
+        }
+        return WIND_HYPHEN_RECORD_PATTERN.matcher(text.trim()).matches();
+    }
+
+    private boolean looksLikeWindJson(JsonNode rootNode, JsonNode dataNode) {
+        JsonNode typeNode = firstNonNull(
+                dataNode.path("msgType"),
+                dataNode.path("type"),
+                dataNode.path("bizType"),
+                rootNode.path("msgType"),
+                rootNode.path("type"),
+                rootNode.path("bizType")
+        );
+        String type = parseText(typeNode);
+        boolean explicitWindType = "wind".equalsIgnoreCase(type);
+
+        JsonNode startStakeNode = firstNonNull(dataNode.path("startStake"), dataNode.path("start_stake"), dataNode.path("startKm"), dataNode.path("start_km"), rootNode.path("startStake"), rootNode.path("start_stake"));
+        JsonNode endStakeNode = firstNonNull(dataNode.path("endStake"), dataNode.path("end_stake"), dataNode.path("endKm"), dataNode.path("end_km"), rootNode.path("endStake"), rootNode.path("end_stake"));
+        boolean hasStake = hasText(parseText(startStakeNode)) || hasText(parseText(endStakeNode));
+
+        JsonNode windNode = firstNonNull(dataNode.path("windSpeed"), dataNode.path("wind_speed"), dataNode.path("wind"), rootNode.path("windSpeed"), rootNode.path("wind_speed"), rootNode.path("wind"));
+        JsonNode windDirectionNode = firstNonNull(dataNode.path("windDirection"), dataNode.path("wind_direction"), rootNode.path("windDirection"), rootNode.path("wind_direction"));
+        boolean hasWindField = hasText(parseText(windNode)) || hasText(parseText(windDirectionNode));
+
+        return explicitWindType || (hasStake && hasWindField);
+    }
+
     private String firstValue(Map<String, String> kv, String... keys) {
         for (String key : keys) {
             String value = kv.get(key);
@@ -292,6 +483,17 @@ public class UdpRealtimeDataService {
         } catch (Exception e) {
             sendFailCount.increment();
             log.error("Send realtime data failed", e);
+        }
+    }
+
+    private void sendWindData(Map<String, Object> data, long timestamp) {
+        try {
+            String message = objectMapper.writeValueAsString(new TransmitDataModel(timestamp, data));
+            kafkaTemplate.send(TOPIC_NAME_WIND, message);
+            windSendCount.increment();
+        } catch (Exception e) {
+            sendFailCount.increment();
+            log.error("Send wind data failed", e);
         }
     }
 
@@ -343,6 +545,24 @@ public class UdpRealtimeDataService {
         }
     }
 
+    private Integer parseIntegerOrNull(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return null;
+        }
+        return parseIntegerOrNull(node.asText());
+    }
+
+    private Integer parseIntegerOrNull(String value) {
+        if (!hasText(value)) {
+            return null;
+        }
+        try {
+            return (int) Double.parseDouble(value.trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private double parseDouble(JsonNode node, double defaultValue) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return defaultValue;
@@ -356,6 +576,44 @@ public class UdpRealtimeDataService {
         } catch (Exception e) {
             return defaultValue;
         }
+    }
+
+    private String parseText(JsonNode node) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return "";
+        }
+        return node.asText("").trim();
+    }
+
+    private boolean isNumeric(String value) {
+        if (!hasText(value)) {
+            return false;
+        }
+        try {
+            Double.parseDouble(value.trim());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean looksLikeStake(String value) {
+        if (!hasText(value)) {
+            return false;
+        }
+        String text = value.trim();
+        if (text.startsWith("K") || text.startsWith("k")) {
+            return true;
+        }
+        try {
+            return Double.parseDouble(text) >= 1000D;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.trim().isEmpty();
     }
 
     private void scheduleTimestampSend(long timestamp) {
@@ -425,19 +683,21 @@ public class UdpRealtimeDataService {
         long payload = udpPayloadCount.sumThenReset();
         long control = csvControlLineCount.sumThenReset();
         long vehicle = csvVehicleLineCount.sumThenReset();
+        long wind = csvWindLineCount.sumThenReset();
         long invalid = csvInvalidLineCount.sumThenReset();
         long fiberSent = fiberSendCount.sumThenReset();
+        long windSent = windSendCount.sumThenReset();
         long timestampSent = timestampSendCount.sumThenReset();
         long failed = sendFailCount.sumThenReset();
 
-        long total = payload + control + vehicle + invalid + fiberSent + timestampSent + failed;
+        long total = payload + control + vehicle + wind + invalid + fiberSent + windSent + timestampSent + failed;
         if (total == 0L) {
             return;
         }
 
         log.info(
-                "UDP summary: payload={}, controlLine={}, vehicleLine={}, invalidLine={}, fiberSent={}, timestampSent={}, failed={}",
-                payload, control, vehicle, invalid, fiberSent, timestampSent, failed
+                "UDP summary: payload={}, controlLine={}, vehicleLine={}, windLine={}, invalidLine={}, fiberSent={}, windSent={}, timestampSent={}, failed={}",
+                payload, control, vehicle, wind, invalid, fiberSent, windSent, timestampSent, failed
         );
     }
 
