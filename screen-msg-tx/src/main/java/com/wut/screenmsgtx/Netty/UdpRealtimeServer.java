@@ -16,6 +16,9 @@ import org.springframework.stereotype.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 @Component
 @ConditionalOnProperty(prefix = "msg.udp", name = "enabled", havingValue = "true")
 public class UdpRealtimeServer implements ApplicationListener<ApplicationStartedEvent> {
@@ -29,7 +32,10 @@ public class UdpRealtimeServer implements ApplicationListener<ApplicationStarted
     @Value("${msg.udp.port:7777}")
     private int port;
 
-    private Channel channel;
+    @Value("${msg.udp.wind-port:0}")
+    private int windPort;
+
+    private final Map<Integer, Channel> channels = new ConcurrentHashMap<>();
 
     public UdpRealtimeServer(UdpRealtimeHandler udpRealtimeHandler) {
         this.udpRealtimeHandler = udpRealtimeHandler;
@@ -38,20 +44,9 @@ public class UdpRealtimeServer implements ApplicationListener<ApplicationStarted
     @Override
     public void onApplicationEvent(ApplicationStartedEvent event) {
         try {
-            Bootstrap bootstrap = new Bootstrap();
-            bootstrap.group(eventLoopGroup)
-                    .channel(NioDatagramChannel.class)
-                    .option(ChannelOption.SO_BROADCAST, true)
-                    .option(ChannelOption.SO_RCVBUF, 1024 * 1024 * 10)
-                    .option(ChannelOption.SO_SNDBUF, 1024 * 1024 * 10)
-                    .handler(udpRealtimeHandler);
-
-            ChannelFuture channelFuture = bootstrap.bind(host, port).sync();
-            if (channelFuture.isSuccess()) {
-                channel = channelFuture.channel();
-                log.info("UDP realtime server started on {}:{}", host, port);
-            } else {
-                log.error("UDP realtime server failed to start on {}:{}", host, port);
+            bindPort(port);
+            if (windPort > 0 && windPort != port) {
+                bindPort(windPort);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -61,12 +56,33 @@ public class UdpRealtimeServer implements ApplicationListener<ApplicationStarted
         }
     }
 
+    private void bindPort(int bindPort) throws InterruptedException {
+        Bootstrap bootstrap = new Bootstrap();
+        bootstrap.group(eventLoopGroup)
+                .channel(NioDatagramChannel.class)
+                .option(ChannelOption.SO_BROADCAST, true)
+                .option(ChannelOption.SO_RCVBUF, 1024 * 1024 * 10)
+                .option(ChannelOption.SO_SNDBUF, 1024 * 1024 * 10)
+                .handler(udpRealtimeHandler);
+
+        ChannelFuture channelFuture = bootstrap.bind(host, bindPort).sync();
+        if (channelFuture.isSuccess()) {
+            channels.put(bindPort, channelFuture.channel());
+            log.info("UDP realtime server started on {}:{}", host, bindPort);
+            return;
+        }
+        log.error("UDP realtime server failed to start on {}:{}", host, bindPort);
+    }
+
     @PreDestroy
     public void destroy() {
         try {
-            if (channel != null) {
-                channel.close();
+            for (Channel channel : channels.values()) {
+                if (channel != null) {
+                    channel.close();
+                }
             }
+            channels.clear();
             eventLoopGroup.shutdownGracefully();
         } catch (Exception e) {
             log.error("UDP realtime server shutdown failed", e);
