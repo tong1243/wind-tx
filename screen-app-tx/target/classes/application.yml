@@ -50,6 +50,7 @@ msg:
     enabled: true
     host: 0.0.0.0
     port: 7777
+    wind-port: 7778
     ack-enabled: false
     ack-message: "ACK"
     send-by-second-enabled: true

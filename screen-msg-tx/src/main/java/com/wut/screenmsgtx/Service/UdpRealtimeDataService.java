@@ -182,6 +182,7 @@ public class UdpRealtimeDataService {
         data.put("speed", parseDouble(firstNonNull(dataNode.path("speed"), dataNode.path("speedKmh")), 0.0));
         data.put("acc", parseDouble(firstNonNull(dataNode.path("acc"), dataNode.path("acceleration")), 0.0));
         data.put("yaw", parseDouble(firstNonNull(dataNode.path("yaw"), dataNode.path("headingAngle")), 0.0));
+        data.put("headingAngle", data.get("yaw"));
         data.put("road", parseInt(dataNode.path("road"), 0));
         data.put("Lane_ID", parseInt(firstNonNull(dataNode.path("Lane_ID"), dataNode.path("laneId"), dataNode.path("lane")), 1));
         data.put("distanceAlongRoad", parseDouble(firstNonNull(dataNode.path("distanceAlongRoad"), dataNode.path("frenetX"), dataNode.path("fiberX")), 0.0));
@@ -254,6 +255,7 @@ public class UdpRealtimeDataService {
             data.put("speed", parseDouble(cols[8], 0.0));
             data.put("acc", parseDouble(cols[9], 0.0));
             data.put("yaw", parseDouble(cols[10], 0.0));
+            data.put("headingAngle", data.get("yaw"));
             data.put("road", parseInt(cols[11], 0));
             data.put("Lane_ID", parseInt(cols[12], 1));
             data.put("distanceAlongRoad", parseDouble(cols[13], 0.0));
@@ -307,6 +309,7 @@ public class UdpRealtimeDataService {
         data.put("speed", parseDouble(firstValue(kv, "SPEED", "SPEED_KMH"), 0.0));
         data.put("acc", parseDouble(firstValue(kv, "ACC", "ACCELERATION"), 0.0));
         data.put("yaw", parseDouble(firstValue(kv, "YAW", "HEADING_ANGLE"), 0.0));
+        data.put("headingAngle", data.get("yaw"));
         data.put("road", parseInt(firstValue(kv, "ROAD"), 0));
         data.put("Lane_ID", parseInt(firstValue(kv, "LANE_ID", "LANE", "LANEID"), 1));
         data.put("distanceAlongRoad", parseDouble(firstValue(kv, "DISTANCE_ALONG_ROAD", "DISTANCEALONGROAD", "FRENET_X", "FIBER_X"), 0.0));
