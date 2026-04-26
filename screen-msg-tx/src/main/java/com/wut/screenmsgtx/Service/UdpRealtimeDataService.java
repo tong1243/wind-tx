@@ -308,7 +308,7 @@ public class UdpRealtimeDataService {
         data.put("height", parseDouble(firstValue(kv, "HEIGHT", "ALT"), 0.0));
         data.put("speed", parseDouble(firstValue(kv, "SPEED", "SPEED_KMH"), 0.0));
         data.put("acc", parseDouble(firstValue(kv, "ACC", "ACCELERATION"), 0.0));
-        data.put("yaw", parseDouble(firstValue(kv, "YAW", "HEADING_ANGLE"), 0.0));
+        data.put("yaw", parseDouble(firstValue(kv, "YAW", "HEADING_ANGLE", "HEADINGANGLE"), 0.0));
         data.put("headingAngle", data.get("yaw"));
         data.put("road", parseInt(firstValue(kv, "ROAD"), 0));
         data.put("Lane_ID", parseInt(firstValue(kv, "LANE_ID", "LANE", "LANEID"), 1));
@@ -649,23 +649,22 @@ public class UdpRealtimeDataService {
     }
 
     private void flushOneSecondBucket() {
-        Map.Entry<Long, ConcurrentLinkedQueue<String>> entry = secondBucketMap.pollFirstEntry();
-        if (entry == null) {
-            return;
-        }
-        long timestamp = entry.getKey();
-        ConcurrentLinkedQueue<String> queue = entry.getValue();
-        String message;
-        while ((message = queue.poll()) != null) {
-            try {
-                kafkaTemplate.send(TOPIC_NAME_FIBER, message);
-                fiberSendCount.increment();
-            } catch (Exception e) {
-                sendFailCount.increment();
-                log.error("Send realtime data failed in second-bucket mode, timestamp={}", timestamp, e);
+        Map.Entry<Long, ConcurrentLinkedQueue<String>> entry;
+        while ((entry = secondBucketMap.pollFirstEntry()) != null) {
+            long timestamp = entry.getKey();
+            ConcurrentLinkedQueue<String> queue = entry.getValue();
+            String message;
+            while ((message = queue.poll()) != null) {
+                try {
+                    kafkaTemplate.send(TOPIC_NAME_FIBER, message);
+                    fiberSendCount.increment();
+                } catch (Exception e) {
+                    sendFailCount.increment();
+                    log.error("Send realtime data failed in second-bucket mode, timestamp={}", timestamp, e);
+                }
             }
+            trySendTimestamp(timestamp);
         }
-        trySendTimestamp(timestamp);
     }
 
     private void trySendTimestamp(long timestamp) {

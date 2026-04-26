@@ -77,6 +77,8 @@ class UdpRealtimeDataServiceTest {
         assertEquals(664607, data.path("id").asInt());
         assertEquals(3, data.path("model").asInt());
         assertEquals(4, data.path("Lane_ID").asInt());
+        assertEquals(1.637, data.path("yaw").asDouble(), 1e-6);
+        assertEquals(1.637, data.path("headingAngle").asDouble(), 1e-6);
         assertEquals(5437.222, data.path("distanceAlongRoad").asDouble(), 1e-6);
     }
 
@@ -120,6 +122,8 @@ class UdpRealtimeDataServiceTest {
         assertEquals(664608, data.path("id").asInt());
         assertEquals(2, data.path("type").asInt());
         assertEquals(2, data.path("direction").asInt());
+        assertEquals(10.1, data.path("yaw").asDouble(), 1e-6);
+        assertEquals(10.1, data.path("headingAngle").asDouble(), 1e-6);
         assertEquals(2, data.path("Lane_ID").asInt());
         assertEquals(1234.5, data.path("distanceAlongRoad").asDouble(), 1e-6);
         assertTrue(topics.contains(TOPIC_NAME_TIMESTAMP));
