@@ -196,7 +196,7 @@ public class UdpRealtimeDataService {
             if (line.isEmpty()) {
                 continue;
             }
-            if (line.endsWith(";")) {
+            if (line.endsWith(";") || line.endsWith("；")) {
                 line = line.substring(0, line.length() - 1);
             }
 
@@ -210,7 +210,7 @@ public class UdpRealtimeDataService {
                 }
             }
 
-            String[] cols = line.split(";");
+            String[] cols = line.split("[;；]");
             if (looksLikeWindPlainCsv(cols)) {
                 long timestamp = parseLong(cols[0], System.currentTimeMillis());
                 Map<String, Object> data = new LinkedHashMap<>();
@@ -270,11 +270,6 @@ public class UdpRealtimeDataService {
             return false;
         }
 
-        if (isControlKvLine(kv)) {
-            csvControlLineCount.increment();
-            return true;
-        }
-
         if (looksLikeWindKvLine(kv)) {
             long timestamp = parseLong(firstValue(kv, "TIMESTAMP", "TIME", "TS"), System.currentTimeMillis());
             Map<String, Object> data = new LinkedHashMap<>();
@@ -293,34 +288,39 @@ public class UdpRealtimeDataService {
             return true;
         }
 
-        if (!looksLikeVehicleKvLine(kv)) {
-            return false;
+        if (looksLikeVehicleKvLine(kv)) {
+            long timestamp = parseLong(firstValue(kv, "TIMESTAMP", "TIME", "TS"), System.currentTimeMillis());
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("id", parseInt(firstValue(kv, "ID", "VEHICLE_ID", "CAR_ID"), 0));
+            data.put("type", parseInt(firstValue(kv, "TYPE", "VEHICLE_TYPE"), 0));
+            data.put("model", parseInt(firstValue(kv, "MODEL", "CAR_MODEL"), 1));
+            data.put("direction", parseInt(firstValue(kv, "DIRECTION", "ROAD_DIRECT"), 1));
+            data.put("longitude", parseDouble(firstValue(kv, "LONGITUDE", "LON"), 0.0));
+            data.put("latitude", parseDouble(firstValue(kv, "LATITUDE", "LAT"), 0.0));
+            data.put("height", parseDouble(firstValue(kv, "HEIGHT", "ALT"), 0.0));
+            data.put("speed", parseDouble(firstValue(kv, "SPEED", "SPEED_KMH"), 0.0));
+            data.put("acc", parseDouble(firstValue(kv, "ACC", "ACCELERATION"), 0.0));
+            data.put("yaw", parseDouble(firstValue(kv, "YAW", "HEADING_ANGLE", "HEADINGANGLE"), 0.0));
+            data.put("headingAngle", data.get("yaw"));
+            data.put("road", parseInt(firstValue(kv, "ROAD"), 0));
+            data.put("Lane_ID", parseInt(firstValue(kv, "LANE_ID", "LANE", "LANEID"), 1));
+            data.put("distanceAlongRoad", parseDouble(firstValue(kv, "DISTANCE_ALONG_ROAD", "DISTANCEALONGROAD", "FRENET_X", "FIBER_X"), 0.0));
+            csvVehicleLineCount.increment();
+            sendRealtimeData(data, timestamp);
+            return true;
         }
 
-        long timestamp = parseLong(firstValue(kv, "TIMESTAMP", "TIME", "TS"), System.currentTimeMillis());
-        Map<String, Object> data = new LinkedHashMap<>();
-        data.put("id", parseInt(firstValue(kv, "ID", "VEHICLE_ID", "CAR_ID"), 0));
-        data.put("type", parseInt(firstValue(kv, "TYPE", "VEHICLE_TYPE"), 0));
-        data.put("model", parseInt(firstValue(kv, "MODEL", "CAR_MODEL"), 1));
-        data.put("direction", parseInt(firstValue(kv, "DIRECTION", "ROAD_DIRECT"), 1));
-        data.put("longitude", parseDouble(firstValue(kv, "LONGITUDE", "LON"), 0.0));
-        data.put("latitude", parseDouble(firstValue(kv, "LATITUDE", "LAT"), 0.0));
-        data.put("height", parseDouble(firstValue(kv, "HEIGHT", "ALT"), 0.0));
-        data.put("speed", parseDouble(firstValue(kv, "SPEED", "SPEED_KMH"), 0.0));
-        data.put("acc", parseDouble(firstValue(kv, "ACC", "ACCELERATION"), 0.0));
-        data.put("yaw", parseDouble(firstValue(kv, "YAW", "HEADING_ANGLE", "HEADINGANGLE"), 0.0));
-        data.put("headingAngle", data.get("yaw"));
-        data.put("road", parseInt(firstValue(kv, "ROAD"), 0));
-        data.put("Lane_ID", parseInt(firstValue(kv, "LANE_ID", "LANE", "LANEID"), 1));
-        data.put("distanceAlongRoad", parseDouble(firstValue(kv, "DISTANCE_ALONG_ROAD", "DISTANCEALONGROAD", "FRENET_X", "FIBER_X"), 0.0));
-        csvVehicleLineCount.increment();
-        sendRealtimeData(data, timestamp);
-        return true;
+        if (isControlKvLine(kv)) {
+            csvControlLineCount.increment();
+            return true;
+        }
+
+        return false;
     }
 
     private Map<String, String> parseKeyValuePairs(String line) {
         Map<String, String> kv = new HashMap<>();
-        String[] cols = line.split(";");
+        String[] cols = line.split("[;；]");
         for (String col : cols) {
             String token = col.trim();
             if (token.isEmpty()) {
@@ -338,6 +338,9 @@ public class UdpRealtimeDataService {
     }
 
     private boolean isControlKvLine(Map<String, String> kv) {
+        if (looksLikeVehicleKvLine(kv) || looksLikeWindKvLine(kv)) {
+            return false;
+        }
         return kv.containsKey("FRAME_ID")
                 || kv.containsKey("FRAME_END")
                 || kv.containsKey("PACKET_INDEX")
