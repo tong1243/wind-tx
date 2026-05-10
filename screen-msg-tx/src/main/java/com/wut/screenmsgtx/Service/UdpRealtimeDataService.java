@@ -13,7 +13,11 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,7 +42,9 @@ public class UdpRealtimeDataService {
     private static final Pattern WIND_HYPHEN_RECORD_PATTERN = Pattern.compile(
             "^([0-9]{10,13})-([kK][0-9]+(?:\\+[0-9]+)?)-([kK][0-9]+(?:\\+[0-9]+)?)-([+-]?[0-9]+(?:\\.[0-9]+)?)$"
     );
+    private static final Pattern TIMESTAMP_TOKEN_PATTERN = Pattern.compile("(?<!\\d)(\\d{10,13})(?!\\d)");
     private static final String CSV_TOKEN_SPLIT_REGEX = "[;,]";
+    private static final DateTimeFormatter TS_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final MsgTaskControlContext msgTaskControlContext;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -79,6 +85,15 @@ public class UdpRealtimeDataService {
     @Value("${msg.udp.summary-log-interval-sec:1}")
     private long summaryLogIntervalSec;
 
+    @Value("${msg.udp.debug-log-enabled:false}")
+    private boolean debugLogEnabled;
+
+    @Value("${msg.udp.debug-log-max-len:2000}")
+    private int debugLogMaxLen;
+
+    @Value("${msg.udp.debug-log-ts-summary-enabled:false}")
+    private boolean debugLogTsSummaryEnabled;
+
     public UdpRealtimeDataService(KafkaTemplate<String, String> kafkaTemplate, MsgTaskControlContext msgTaskControlContext) {
         this.kafkaTemplate = kafkaTemplate;
         this.msgTaskControlContext = msgTaskControlContext;
@@ -108,6 +123,7 @@ public class UdpRealtimeDataService {
         if (text.isEmpty()) {
             return;
         }
+        printUdpDebug(text);
 
         if (maybeCsv(text)) {
             parseAndSendCsv(text);
@@ -438,6 +454,70 @@ public class UdpRealtimeDataService {
 
     private String[] splitCsvTokens(String line) {
         return line.split(CSV_TOKEN_SPLIT_REGEX);
+    }
+
+    private void printUdpDebug(String text) {
+        if (!debugLogEnabled && !debugLogTsSummaryEnabled) {
+            return;
+        }
+        if (debugLogEnabled) {
+            log.info("UDP raw payload: {}", truncateForLog(text));
+        }
+        if (debugLogTsSummaryEnabled) {
+            printTimestampSummary(text);
+        }
+    }
+
+    private String truncateForLog(String text) {
+        int maxLen = Math.max(debugLogMaxLen, 200);
+        if (text.length() <= maxLen) {
+            return text;
+        }
+        return text.substring(0, maxLen) + "...(truncated,totalChars=" + text.length() + ")";
+    }
+
+    private void printTimestampSummary(String text) {
+        Matcher matcher = TIMESTAMP_TOKEN_PATTERN.matcher(text);
+        HashSet<Long> uniqueTs = new HashSet<>();
+        long min = Long.MAX_VALUE;
+        long max = Long.MIN_VALUE;
+        int total = 0;
+        while (matcher.find()) {
+            long normalized = normalizePossibleEpochTimestamp(parseLong(matcher.group(1), 0L));
+            if (normalized <= 0L) {
+                continue;
+            }
+            total++;
+            uniqueTs.add(normalized);
+            if (normalized < min) {
+                min = normalized;
+            }
+            if (normalized > max) {
+                max = normalized;
+            }
+        }
+        if (total == 0) {
+            return;
+        }
+        long spanMin = Math.max(0L, (max - min) / 60000L);
+        log.info(
+                "UDP timestamp summary: totalTokens={}, unique={}, min={}, max={}, spanMin={}",
+                total, uniqueTs.size(), formatTimestamp(min), formatTimestamp(max), spanMin
+        );
+    }
+
+    private long normalizePossibleEpochTimestamp(long ts) {
+        if (ts <= 0L) {
+            return 0L;
+        }
+        if (ts < 1000000000000L) {
+            return ts * 1000L;
+        }
+        return ts;
+    }
+
+    private String formatTimestamp(long ts) {
+        return ts + "(" + TS_FORMATTER.format(Instant.ofEpochMilli(ts)) + ")";
     }
 
     private boolean looksLikeWindHyphenRecord(String text) {
