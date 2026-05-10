@@ -38,6 +38,7 @@ public class UdpRealtimeDataService {
     private static final Pattern WIND_HYPHEN_RECORD_PATTERN = Pattern.compile(
             "^([0-9]{10,13})-([kK][0-9]+(?:\\+[0-9]+)?)-([kK][0-9]+(?:\\+[0-9]+)?)-([+-]?[0-9]+(?:\\.[0-9]+)?)$"
     );
+    private static final String CSV_TOKEN_SPLIT_REGEX = "[;,]";
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final MsgTaskControlContext msgTaskControlContext;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -210,7 +211,7 @@ public class UdpRealtimeDataService {
                 }
             }
 
-            String[] cols = line.split("[;；]");
+            String[] cols = splitCsvTokens(line);
             if (looksLikeWindPlainCsv(cols)) {
                 long timestamp = parseLong(cols[0], System.currentTimeMillis());
                 Map<String, Object> data = new LinkedHashMap<>();
@@ -320,7 +321,7 @@ public class UdpRealtimeDataService {
 
     private Map<String, String> parseKeyValuePairs(String line) {
         Map<String, String> kv = new HashMap<>();
-        String[] cols = line.split("[;；]");
+        String[] cols = splitCsvTokens(line);
         for (String col : cols) {
             String token = col.trim();
             if (token.isEmpty()) {
@@ -406,7 +407,7 @@ public class UdpRealtimeDataService {
         if (!hasText(line)) {
             return false;
         }
-        String[] records = line.split("[;；]");
+        String[] records = splitCsvTokens(line);
         int parsedCount = 0;
         for (String raw : records) {
             String token = raw == null ? "" : raw.trim();
@@ -415,7 +416,7 @@ public class UdpRealtimeDataService {
             }
             Matcher matcher = WIND_HYPHEN_RECORD_PATTERN.matcher(token);
             if (!matcher.matches()) {
-                return false;
+                continue;
             }
             long timestamp = parseLong(matcher.group(1), System.currentTimeMillis());
             Map<String, Object> data = new LinkedHashMap<>();
@@ -433,6 +434,10 @@ public class UdpRealtimeDataService {
             parsedCount++;
         }
         return parsedCount > 0;
+    }
+
+    private String[] splitCsvTokens(String line) {
+        return line.split(CSV_TOKEN_SPLIT_REGEX);
     }
 
     private boolean looksLikeWindHyphenRecord(String text) {
