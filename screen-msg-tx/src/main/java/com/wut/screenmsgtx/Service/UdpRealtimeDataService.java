@@ -40,15 +40,16 @@ import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_WIND;
 public class UdpRealtimeDataService {
     private static final Logger log = LoggerFactory.getLogger(UdpRealtimeDataService.class);
     private static final Pattern WIND_HYPHEN_RECORD_PATTERN = Pattern.compile(
-            "^([0-9]{10,13})-([kK][0-9]+(?:\\+[0-9]+)?)-([kK][0-9]+(?:\\+[0-9]+)?)-([+-]?[0-9]+(?:\\.[0-9]+)?)$"
+            "^([0-9]{10,13})-([kK][0-9]+(?:\\+[0-9]+)?)-([kK][0-9]+(?:\\+[0-9]+)?)-([+-]?[0-9]+(?:\\.[0-9]+)?)(?:-(.+))?$"
     );
     private static final Pattern TIMESTAMP_TOKEN_PATTERN = Pattern.compile("(?<!\\d)(\\d{10,13})(?!\\d)");
-    private static final String CSV_TOKEN_SPLIT_REGEX = "[;,]";
+    private static final String CSV_TOKEN_SPLIT_REGEX = "[;,；，]";
     private static final DateTimeFormatter TS_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final MsgTaskControlContext msgTaskControlContext;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AtomicLong lastTimestamp = new AtomicLong(Long.MIN_VALUE);
+    private final AtomicLong lastFrameNoPayloadLogAt = new AtomicLong(0L);
     private final ScheduledExecutorService timestampScheduler = Executors.newSingleThreadScheduledExecutor();
     private final Map<Long, ScheduledFuture<?>> timestampTaskMap = new ConcurrentHashMap<>();
     private final ScheduledExecutorService secondBucketScheduler = Executors.newSingleThreadScheduledExecutor();
@@ -56,6 +57,7 @@ public class UdpRealtimeDataService {
     private final ScheduledExecutorService summaryScheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> secondBucketTaskFuture;
     private ScheduledFuture<?> summaryTaskFuture;
+    private final Map<String, WindFrameBuffer> windFrameBufferMap = new ConcurrentHashMap<>();
 
     private final LongAdder udpPayloadCount = new LongAdder();
     private final LongAdder csvControlLineCount = new LongAdder();
@@ -93,6 +95,9 @@ public class UdpRealtimeDataService {
 
     @Value("${msg.udp.debug-log-ts-summary-enabled:false}")
     private boolean debugLogTsSummaryEnabled;
+
+    @Value("${msg.udp.frame-buffer-ttl-ms:10000}")
+    private long frameBufferTtlMs;
 
     public UdpRealtimeDataService(KafkaTemplate<String, String> kafkaTemplate, MsgTaskControlContext msgTaskControlContext) {
         this.kafkaTemplate = kafkaTemplate;
@@ -287,6 +292,17 @@ public class UdpRealtimeDataService {
             return false;
         }
 
+        if (handleFragmentedWindFrame(kv)) {
+            return true;
+        }
+
+        // 兼容“控制头 + DATA=风速串”的封装场景：
+        // 先尝试从常见数据字段中抽取并按短横线风速记录解析。
+        String packedWind = unwrapQuoted(firstValue(kv, "DATA", "PAYLOAD", "BODY", "CONTENT", "MSG", "MESSAGE"));
+        if (hasText(packedWind) && parseAndSendWindHyphenRecords(packedWind)) {
+            return true;
+        }
+
         if (looksLikeWindKvLine(kv)) {
             long timestamp = parseLong(firstValue(kv, "TIMESTAMP", "TIME", "TS"), System.currentTimeMillis());
             Map<String, Object> data = new LinkedHashMap<>();
@@ -333,6 +349,97 @@ public class UdpRealtimeDataService {
         }
 
         return false;
+    }
+
+    private boolean handleFragmentedWindFrame(Map<String, String> kv) {
+        String frameId = firstValue(kv, "FRAME_ID", "FRAMEID", "FID");
+        Integer packetIndex = parsePositiveInteger(firstValue(kv, "PACKET_INDEX", "PACKETINDEX", "INDEX", "PKT_INDEX"));
+        Integer packetTotal = parsePositiveInteger(firstValue(kv, "PACKET_TOTAL", "PACKETTOTAL", "TOTAL", "PKT_TOTAL"));
+        if (!hasText(frameId) || packetIndex == null || packetTotal == null || packetTotal <= 0) {
+            return false;
+        }
+
+        String fragmentData = unwrapQuoted(firstValue(
+                kv,
+                "DATA", "PAYLOAD", "BODY", "CONTENT", "MSG", "MESSAGE",
+                "PACKET_DATA", "FRAME_DATA", "CHUNK", "FRAGMENT"
+        ));
+        if (!hasText(fragmentData)) {
+            fragmentData = detectWindLikePayloadFromValues(kv);
+        }
+        if (!hasText(fragmentData)) {
+            maybeLogFrameWithoutPayload(frameId, packetIndex, packetTotal, kv);
+        }
+        long now = System.currentTimeMillis();
+        WindFrameBuffer buffer = windFrameBufferMap.computeIfAbsent(frameId, key -> new WindFrameBuffer(packetTotal, now));
+
+        String mergedPayload = null;
+        synchronized (buffer) {
+            buffer.total = Math.max(buffer.total, packetTotal);
+            buffer.updatedAt = now;
+            if (hasText(fragmentData)) {
+                buffer.fragments.put(packetIndex, fragmentData);
+            }
+            if (buffer.fragments.size() >= buffer.total) {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 1; i <= buffer.total; i++) {
+                    String part = buffer.fragments.get(i);
+                    if (!hasText(part)) {
+                        return true;
+                    }
+                    if (sb.length() > 0) {
+                        sb.append(';');
+                    }
+                    sb.append(part.trim());
+                }
+                mergedPayload = sb.toString();
+            }
+        }
+
+        cleanupFrameBuffers(now);
+        if (!hasText(mergedPayload)) {
+            return true;
+        }
+
+        windFrameBufferMap.remove(frameId);
+        if (!parseAndSendWindHyphenRecords(mergedPayload)) {
+            if (debugLogEnabled) {
+                log.warn("assembled wind frame parse failed: frameId={}, total={}, payload={}", frameId, packetTotal, truncateForLog(mergedPayload));
+            }
+        }
+        return true;
+    }
+
+    private String detectWindLikePayloadFromValues(Map<String, String> kv) {
+        String best = "";
+        for (String raw : kv.values()) {
+            String value = unwrapQuoted(raw);
+            if (!hasText(value)) {
+                continue;
+            }
+            String lower = value.toLowerCase();
+            boolean hasStakeLike = lower.contains("-k") || lower.contains("k3");
+            boolean hasTsLike = TIMESTAMP_TOKEN_PATTERN.matcher(value).find();
+            if (!hasStakeLike || !hasTsLike) {
+                continue;
+            }
+            if (value.length() > best.length()) {
+                best = value;
+            }
+        }
+        return best;
+    }
+
+    private void maybeLogFrameWithoutPayload(String frameId, int packetIndex, int packetTotal, Map<String, String> kv) {
+        long now = System.currentTimeMillis();
+        long last = lastFrameNoPayloadLogAt.get();
+        if (now - last < 5000L || !lastFrameNoPayloadLogAt.compareAndSet(last, now)) {
+            return;
+        }
+        log.info(
+                "frame packet has no detectable wind payload: frameId={}, packetIndex={}, packetTotal={}, keys={}",
+                frameId, packetIndex, packetTotal, kv.keySet()
+        );
     }
 
     private Map<String, String> parseKeyValuePairs(String line) {
@@ -425,6 +532,9 @@ public class UdpRealtimeDataService {
         }
         String[] records = splitCsvTokens(line);
         int parsedCount = 0;
+        HashSet<Long> uniqueTs = new HashSet<>();
+        long minTs = Long.MAX_VALUE;
+        long maxTs = Long.MIN_VALUE;
         for (String raw : records) {
             String token = raw == null ? "" : raw.trim();
             if (token.isEmpty()) {
@@ -435,12 +545,18 @@ public class UdpRealtimeDataService {
                 continue;
             }
             long timestamp = parseLong(matcher.group(1), System.currentTimeMillis());
+            long normalizedTs = normalizePossibleEpochTimestamp(timestamp);
+            if (normalizedTs > 0L) {
+                uniqueTs.add(normalizedTs);
+                minTs = Math.min(minTs, normalizedTs);
+                maxTs = Math.max(maxTs, normalizedTs);
+            }
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("direction", null);
             data.put("startStake", matcher.group(2));
             data.put("endStake", matcher.group(3));
             data.put("windSpeed", parseDouble(matcher.group(4), 0.0));
-            data.put("windDirection", "");
+            data.put("windDirection", matcher.group(5) == null ? "" : matcher.group(5).trim());
             data.put("dataSource", "");
             data.put("lightVehicleSpeedLimit", null);
             data.put("heavyVehicleSpeedLimit", null);
@@ -449,11 +565,35 @@ public class UdpRealtimeDataService {
             sendWindData(data, timestamp);
             parsedCount++;
         }
+        if (parsedCount > 0) {
+            if (uniqueTs.size() <= 1) {
+                String tsDisplay = uniqueTs.isEmpty() ? "N/A" : formatTimestamp(minTs);
+                log.info("wind payload timestamp summary: parsedRecords={}, uniqueTimestamps={}, timestamp={}", parsedCount, uniqueTs.size(), tsDisplay);
+            } else {
+                log.info("wind payload timestamp summary: parsedRecords={}, uniqueTimestamps={}, range=[{}, {}]",
+                        parsedCount, uniqueTs.size(), formatTimestamp(minTs), formatTimestamp(maxTs));
+            }
+        }
         return parsedCount > 0;
     }
 
     private String[] splitCsvTokens(String line) {
         return line.split(CSV_TOKEN_SPLIT_REGEX);
+    }
+
+    private String unwrapQuoted(String text) {
+        if (!hasText(text)) {
+            return text;
+        }
+        String value = text.trim();
+        if (value.length() >= 2) {
+            char first = value.charAt(0);
+            char last = value.charAt(value.length() - 1);
+            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+                return value.substring(1, value.length() - 1).trim();
+            }
+        }
+        return value;
     }
 
     private void printUdpDebug(String text) {
@@ -688,6 +828,18 @@ public class UdpRealtimeDataService {
         }
     }
 
+    private Integer parsePositiveInteger(String value) {
+        if (!hasText(value)) {
+            return null;
+        }
+        try {
+            int parsed = (int) Double.parseDouble(value.trim());
+            return parsed > 0 ? parsed : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private boolean looksLikeStake(String value) {
         if (!hasText(value)) {
             return false;
@@ -770,6 +922,7 @@ public class UdpRealtimeDataService {
     }
 
     private void printAndResetSummary() {
+        cleanupFrameBuffers(System.currentTimeMillis());
         long payload = udpPayloadCount.sumThenReset();
         long control = csvControlLineCount.sumThenReset();
         long vehicle = csvVehicleLineCount.sumThenReset();
@@ -791,6 +944,11 @@ public class UdpRealtimeDataService {
         );
     }
 
+    private void cleanupFrameBuffers(long now) {
+        long ttl = Math.max(frameBufferTtlMs, 1000L);
+        windFrameBufferMap.entrySet().removeIf(entry -> now - entry.getValue().updatedAt > ttl);
+    }
+
     @PreDestroy
     public void destroy() {
         timestampTaskMap.values().forEach(task -> task.cancel(false));
@@ -807,5 +965,17 @@ public class UdpRealtimeDataService {
             summaryTaskFuture.cancel(false);
         }
         summaryScheduler.shutdownNow();
+        windFrameBufferMap.clear();
+    }
+
+    private static class WindFrameBuffer {
+        private int total;
+        private final Map<Integer, String> fragments = new HashMap<>();
+        private long updatedAt;
+
+        private WindFrameBuffer(int total, long updatedAt) {
+            this.total = Math.max(total, 1);
+            this.updatedAt = updatedAt;
+        }
     }
 }

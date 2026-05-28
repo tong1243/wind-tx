@@ -20,6 +20,7 @@ import java.util.stream.IntStream;
 
 import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_FIBER;
 import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_TIMESTAMP;
+import static com.wut.screencommontx.Static.MsgModuleStatic.TOPIC_NAME_WIND;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -127,5 +128,51 @@ class UdpRealtimeDataServiceTest {
         assertEquals(2, data.path("Lane_ID").asInt());
         assertEquals(1234.5, data.path("distanceAlongRoad").asDouble(), 1e-6);
         assertTrue(topics.contains(TOPIC_NAME_TIMESTAMP));
+    }
+
+    @Test
+    void shouldParseWindHyphenRecordWithWindDirection() throws Exception {
+        String payload = "1773910148002-K3222-K3223-19.5-NE";
+        service.handleUdpPayload(payload.getBytes(StandardCharsets.UTF_8));
+        Thread.sleep(80);
+
+        List<String> topics = kafkaTemplate.topics;
+        List<String> bodies = kafkaTemplate.payloads;
+        int windIndex = IntStream.range(0, topics.size())
+                .filter(i -> TOPIC_NAME_WIND.equals(topics.get(i)))
+                .findFirst()
+                .orElse(-1);
+        assertTrue(windIndex >= 0);
+
+        JsonNode root = objectMapper.readTree(bodies.get(windIndex));
+        JsonNode data = root.path("data");
+        assertEquals(1773910148002L, root.path("timestamp").asLong());
+        assertEquals("K3222", data.path("startStake").asText());
+        assertEquals("K3223", data.path("endStake").asText());
+        assertEquals(19.5, data.path("windSpeed").asDouble(), 1e-6);
+        assertEquals("NE", data.path("windDirection").asText());
+    }
+
+    @Test
+    void shouldKeepBackwardCompatibilityForWindHyphenRecordWithoutWindDirection() throws Exception {
+        String payload = "1773910148003-K3222-K3223-19.5";
+        service.handleUdpPayload(payload.getBytes(StandardCharsets.UTF_8));
+        Thread.sleep(80);
+
+        List<String> topics = kafkaTemplate.topics;
+        List<String> bodies = kafkaTemplate.payloads;
+        int windIndex = IntStream.range(0, topics.size())
+                .filter(i -> TOPIC_NAME_WIND.equals(topics.get(i)))
+                .findFirst()
+                .orElse(-1);
+        assertTrue(windIndex >= 0);
+
+        JsonNode root = objectMapper.readTree(bodies.get(windIndex));
+        JsonNode data = root.path("data");
+        assertEquals(1773910148003L, root.path("timestamp").asLong());
+        assertEquals("K3222", data.path("startStake").asText());
+        assertEquals("K3223", data.path("endStake").asText());
+        assertEquals(19.5, data.path("windSpeed").asDouble(), 1e-6);
+        assertEquals("", data.path("windDirection").asText());
     }
 }

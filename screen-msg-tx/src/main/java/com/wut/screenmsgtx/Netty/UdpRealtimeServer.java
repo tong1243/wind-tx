@@ -5,6 +5,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.FixedRecvByteBufAllocator;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import jakarta.annotation.PreDestroy;
@@ -35,6 +36,9 @@ public class UdpRealtimeServer implements ApplicationListener<ApplicationStarted
     @Value("${msg.udp.wind-port:0}")
     private int windPort;
 
+    @Value("${msg.udp.max-datagram-bytes:65535}")
+    private int maxDatagramBytes;
+
     private final Map<Integer, Channel> channels = new ConcurrentHashMap<>();
 
     public UdpRealtimeServer(UdpRealtimeHandler udpRealtimeHandler) {
@@ -57,18 +61,20 @@ public class UdpRealtimeServer implements ApplicationListener<ApplicationStarted
     }
 
     private void bindPort(int bindPort) throws InterruptedException {
+        int receiveDatagramBytes = Math.max(2048, Math.min(maxDatagramBytes, 65535));
         Bootstrap bootstrap = new Bootstrap();
         bootstrap.group(eventLoopGroup)
                 .channel(NioDatagramChannel.class)
                 .option(ChannelOption.SO_BROADCAST, true)
                 .option(ChannelOption.SO_RCVBUF, 1024 * 1024 * 10)
                 .option(ChannelOption.SO_SNDBUF, 1024 * 1024 * 10)
+                .option(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(receiveDatagramBytes))
                 .handler(udpRealtimeHandler);
 
         ChannelFuture channelFuture = bootstrap.bind(host, bindPort).sync();
         if (channelFuture.isSuccess()) {
             channels.put(bindPort, channelFuture.channel());
-            log.info("UDP realtime server started on {}:{}", host, bindPort);
+            log.info("UDP realtime server started on {}:{}, datagramBufferBytes={}", host, bindPort, receiveDatagramBytes);
             return;
         }
         log.error("UDP realtime server failed to start on {}:{}", host, bindPort);
