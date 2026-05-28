@@ -60,3 +60,4 @@ msg:
     debug-log-enabled: false
     debug-log-max-len: 2000
     debug-log-ts-summary-enabled: false
+    max-datagram-bytes: 65535
